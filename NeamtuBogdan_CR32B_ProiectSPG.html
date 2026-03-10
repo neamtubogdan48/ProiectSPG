@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8">
+<title>Sisteme de Prelucrare Grafica</title>
+<style>
+    * { margin: 0; padding: 0; } 
+    body { overflow: hidden; cursor: crosshair; background: #000; }
+</style>
+</head>
+<body>
+
+<script type="importmap">
+  { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// Renderer
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// Scena
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(0, 18, 65);
+
+scene.background = new THREE.CubeTextureLoader().load(Array(6).fill('sky.jpg'));
+scene.add(new THREE.AmbientLight(0xffffff, 0.1));
+
+// Soare
+const sun = new THREE.DirectionalLight(0xffeedd, 0.6); 
+sun.position.set(-80, 120, -60);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -150, right: 150, top: 150, bottom: -150, near: 1, far: 350 });
+scene.add(sun);
+
+// Texturi
+const tl = new THREE.TextureLoader();
+function tex(path, r = 1) {
+    const t = tl.load(path); 
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; 
+    t.repeat.set(r, r); 
+    return t;
+}
+
+let getH = (x, z) => 0; 
+
+// Heightmap
+const img = new Image();
+img.src = 'heightmap.png';
+img.onload = () => {
+    const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
+    cv.getContext('2d').drawImage(img, 0, 0);
+    const px = cv.getContext('2d').getImageData(0, 0, img.width, img.height).data;
+
+    getH = (x, z) => {
+        const u = Math.floor((x / 300 + .5) * (img.width - 1));
+        const v = Math.floor((1 - (z / 300 + .5)) * (img.height - 1));
+        if (u < 0 || u >= img.width || v < 0 || v >= img.height) return 0;
+        return (px[(v * img.width + u) * 4] / 255) * 6;
+    };
+
+    // Teren
+    const tGeo = new THREE.PlaneGeometry(300, 300, 100, 100);
+    tGeo.rotateX(-Math.PI / 2);
+    const pp = tGeo.attributes.position;
+    for (let i = 0; i < pp.count; i++) pp.setY(i, getH(pp.getX(i), pp.getZ(i)));
+    pp.needsUpdate = true; 
+    tGeo.computeVertexNormals();
+    
+    // Blend iarba-piatra
+    const tMat = new THREE.MeshStandardMaterial({ map: tex('grass.jpg', 10), roughness: 0.9 });
+    tMat.onBeforeCompile = (shader) => {
+        shader.uniforms.rTex = { value: tex('rock.jpg', 10) };
+        shader.vertexShader = `varying float vH;\n` + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace(`#include <begin_vertex>`, `#include <begin_vertex>\n vH = position.y;`);
+        shader.fragmentShader = `uniform sampler2D rTex;\nvarying float vH;\n` + shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace(
+            `#include <map_fragment>`,
+            `vec4 texelColor = texture2D( map, vMapUv );
+             vec4 rockColor = texture2D( rTex, vMapUv );
+             float blend = smoothstep(1.5, 3.5, vH);
+             texelColor = mix(texelColor, rockColor, blend);
+             diffuseColor *= texelColor;`
+        );
+    };
+    const tMesh = new THREE.Mesh(tGeo, tMat);
+    tMesh.receiveShadow = true;
+    scene.add(tMesh);
+
+    // Circuit
+    const RX = 45, RZ = 28, W = 10, SEG = 80;
+    const cv2 = [], uv2 = [], id2 = [];
+    for (let i = 0; i < SEG; i++) {
+        const a0 = (i / SEG) * Math.PI * 2, a1 = ((i + 1) / SEG) * Math.PI * 2;
+        const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+        const b = cv2.length / 3;
+        cv2.push(RX * c0, getH(RX * c0, RZ * s0) + .3, RZ * s0, (RX + W) * c0, getH((RX + W) * c0, (RZ + W) * s0) + .3, (RZ + W) * s0,
+                 RX * c1, getH(RX * c1, RZ * s1) + .3, RZ * s1, (RX + W) * c1, getH((RX + W) * c1, (RZ + W) * s1) + .3, (RZ + W) * s1);
+        const v = i / SEG * 8; uv2.push(0, v, 1, v, 0, v + 8 / SEG, 1, v + 8 / SEG);
+        id2.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
+    }
+    const cGeo = new THREE.BufferGeometry();
+    cGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(cv2), 3));
+    cGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv2), 2));
+    cGeo.setIndex(id2); cGeo.computeVertexNormals();
+    const track = new THREE.Mesh(cGeo, new THREE.MeshStandardMaterial({ map: tex('asphalt.jpg', 6), side: THREE.DoubleSide, roughness: 0.7 }));
+    track.receiveShadow = true; 
+    scene.add(track);
+
+    // Cladiri
+    const bMat = new THREE.MeshStandardMaterial({ map: tex('house.jpg') });
+    [[65, 5], [-65, 0], [5, 52], [-5, -56], [58, -32], [-58, 38], [40, 45], [-40, -45], [70, -20], [-70, 20]].forEach(([x, z], i) => {
+        const h = 8 + (i % 3) * 4, m = new THREE.Mesh(new THREE.BoxGeometry(6, h, 6), bMat);
+        m.position.set(x, getH(x, z) + h / 2, z);
+        m.castShadow = m.receiveShadow = true;
+        scene.add(m);
+    });
+
+    // Pomi
+    const plGeo = new THREE.PlaneGeometry(1, 1);
+    plGeo.translate(0, .5, 0);
+    const trMat = new THREE.MeshStandardMaterial({ map: tex('tree.png'), side: THREE.DoubleSide, transparent: true, alphaTest: 0.1 });
+    [[20, 5], [-22, 0], [3, 22], [0, -24], [18, -18], [-15, 20], [25, 10], [-25, -10], [10, 25], [-10, -25]].forEach(([x, z], i) => {
+        const sc = 5 + i % 3 * 2, hy = getH(x, z);
+        [0, Math.PI / 2].forEach(r => {
+            const m = new THREE.Mesh(plGeo, trMat);
+            m.scale.set(sc, sc * 2, 1); 
+            m.position.set(x, hy, z); 
+            m.rotation.y = r;
+            m.castShadow = true; scene.add(m);
+        });
+    });
+
+    // Stalpi de iluminat
+    const stMat = new THREE.MeshStandardMaterial({ map: tex('lamp.png'), side: THREE.DoubleSide, transparent: true, alphaTest: 0.1 });
+    const lamps = [[50, 0], [-50, 0], [0, 40], [0, -40]];
+    
+    lamps.forEach(([x, z]) => {
+        const hy = getH(x, z), h = 10;
+        
+        [0, Math.PI / 2].forEach(r => {
+            const m = new THREE.Mesh(plGeo, stMat);
+            m.scale.set(3, h, 1); 
+            m.position.set(x, hy, z);
+             m.rotation.y = r;
+            m.castShadow = true; scene.add(m);
+        });
+        
+        const pl = new THREE.PointLight(0xffaa00, 1500, 80, 2);
+        pl.position.set(x, hy + h - 0.5, z); 
+        pl.castShadow = true;
+        pl.shadow.mapSize.set(512, 512); 
+        scene.add(pl);
+    });
+};
+
+// Camera
+let yaw = -90, pitch = -15;
+const dir = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0), keys = {};
+
+function updateDir() {
+    const y = THREE.MathUtils.degToRad(yaw), p = THREE.MathUtils.degToRad(pitch);
+    dir.set(Math.cos(y) * Math.cos(p), Math.sin(p), Math.sin(y) * Math.cos(p)).normalize();
+}
+updateDir();
+
+// Input
+renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
+
+document.addEventListener('mousemove', e => {
+    if (document.pointerLockElement !== renderer.domElement) return;
+    yaw += e.movementX * 0.12;
+    pitch = THREE.MathUtils.clamp(pitch - e.movementY * 0.12, -89, 89);
+    updateDir();
+});
+
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+window.addEventListener('resize', () => { 
+    camera.aspect = innerWidth / innerHeight; 
+    camera.updateProjectionMatrix(); 
+    renderer.setSize(innerWidth, innerHeight); 
+});
+
+function loop() {
+    requestAnimationFrame(loop);
+    const spd = 0.3;
+    const moveDir = new THREE.Vector3(dir.x, 0, dir.z).normalize();
+    const r = new THREE.Vector3().crossVectors(moveDir, up).normalize();
+    if (keys['w']) camera.position.addScaledVector(moveDir, spd);
+    if (keys['s']) camera.position.addScaledVector(moveDir, -spd);
+    if (keys['a']) camera.position.addScaledVector(r, -spd);
+    if (keys['d']) camera.position.addScaledVector(r, spd);
+    if (keys['q']) camera.position.y += spd;
+    if (keys['e']) camera.position.y -= spd;
+    camera.lookAt(camera.position.clone().add(dir));
+    renderer.render(scene, camera);
+}
+loop();
+</script>
+</body>
+</html>
