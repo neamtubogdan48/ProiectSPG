@@ -6,9 +6,12 @@
 <style>
     * { margin: 0; padding: 0; } 
     body { overflow: hidden; cursor: crosshair; background: #000; }
+    #info { position: absolute; top: 10px; left: 10px; color: #fff; font: 14px monospace; background: rgba(0,0,0,0.6); padding: 8px; border-radius: 4px; pointer-events: none; z-index: 10;}
+    #click { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: 22px monospace; background: rgba(0,0,0,0.7); cursor: pointer; z-index: 5;}
 </style>
 </head>
 <body>
+<div id="click">Click pentru a activa controlul camerei</div>
 
 <script type="importmap">
   { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
@@ -43,13 +46,14 @@ scene.add(sun);
 // Texturi
 const tl = new THREE.TextureLoader();
 function tex(path, r = 1) {
-    const t = tl.load(path); 
-    t.wrapS = t.wrapT = THREE.RepeatWrapping; 
-    t.repeat.set(r, r); 
-    return t;
+    const t = tl.load(path); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(r, r); return t;
 }
 
+// Coliziuni
 let getH = (x, z) => 0; 
+let car = null;
+const colliders = []; 
+const carBox = new THREE.Box3(); 
 
 // Heightmap
 const img = new Image();
@@ -71,10 +75,8 @@ img.onload = () => {
     tGeo.rotateX(-Math.PI / 2);
     const pp = tGeo.attributes.position;
     for (let i = 0; i < pp.count; i++) pp.setY(i, getH(pp.getX(i), pp.getZ(i)));
-    pp.needsUpdate = true; 
-    tGeo.computeVertexNormals();
+    pp.needsUpdate = true; tGeo.computeVertexNormals();
     
-    // Blend iarba-piatra
     const tMat = new THREE.MeshStandardMaterial({ map: tex('grass.jpg', 10), roughness: 0.9 });
     tMat.onBeforeCompile = (shader) => {
         shader.uniforms.rTex = { value: tex('rock.jpg', 10) };
@@ -111,16 +113,19 @@ img.onload = () => {
     cGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv2), 2));
     cGeo.setIndex(id2); cGeo.computeVertexNormals();
     const track = new THREE.Mesh(cGeo, new THREE.MeshStandardMaterial({ map: tex('asphalt.jpg', 6), side: THREE.DoubleSide, roughness: 0.7 }));
-    track.receiveShadow = true; 
-    scene.add(track);
+    track.receiveShadow = true; scene.add(track);
 
     // Cladiri
     const bMat = new THREE.MeshStandardMaterial({ map: tex('house.jpg') });
     [[65, 5], [-65, 0], [5, 52], [-5, -56], [58, -32], [-58, 38], [40, 45], [-40, -45], [70, -20], [-70, 20]].forEach(([x, z], i) => {
-        const h = 8 + (i % 3) * 4, m = new THREE.Mesh(new THREE.BoxGeometry(6, h, 6), bMat);
+        const h = 8 + (i % 3) * 4;
+        const m = new THREE.Mesh(new THREE.BoxGeometry(6, h, 6), bMat);
         m.position.set(x, getH(x, z) + h / 2, z);
         m.castShadow = m.receiveShadow = true;
         scene.add(m);
+
+        m.updateMatrixWorld();
+        colliders.push(new THREE.Box3().setFromObject(m));
     });
 
     // Pomi
@@ -131,34 +136,52 @@ img.onload = () => {
         const sc = 5 + i % 3 * 2, hy = getH(x, z);
         [0, Math.PI / 2].forEach(r => {
             const m = new THREE.Mesh(plGeo, trMat);
-            m.scale.set(sc, sc * 2, 1); 
-            m.position.set(x, hy, z); 
-            m.rotation.y = r;
+            m.scale.set(sc, sc * 2, 1); m.position.set(x, hy, z); m.rotation.y = r;
             m.castShadow = true; scene.add(m);
         });
+
+        // Hitbox trunchi
+        const treeBox = new THREE.Box3().setFromCenterAndSize(
+            new THREE.Vector3(x, hy + sc, z), 
+            new THREE.Vector3(0.8, sc * 2, 0.8)
+        );
+        colliders.push(treeBox);
     });
 
-    // Stalpi de iluminat
+    // Stalpi iluminat
     const stMat = new THREE.MeshStandardMaterial({ map: tex('lamp.png'), side: THREE.DoubleSide, transparent: true, alphaTest: 0.1 });
     const lamps = [[50, 0], [-50, 0], [0, 40], [0, -40]];
-    
     lamps.forEach(([x, z]) => {
         const hy = getH(x, z), h = 10;
-        
         [0, Math.PI / 2].forEach(r => {
             const m = new THREE.Mesh(plGeo, stMat);
-            m.scale.set(3, h, 1); 
-            m.position.set(x, hy, z);
-             m.rotation.y = r;
+            m.scale.set(3, h, 1); m.position.set(x, hy, z); m.rotation.y = r;
             m.castShadow = true; scene.add(m);
         });
-        
         const pl = new THREE.PointLight(0xffaa00, 1500, 80, 2);
         pl.position.set(x, hy + h - 0.5, z); 
         pl.castShadow = true;
         pl.shadow.mapSize.set(512, 512); 
         scene.add(pl);
+
+        // Hitbox stalp
+        const lampBox = new THREE.Box3().setFromCenterAndSize(
+            new THREE.Vector3(x, hy + h / 2, z), 
+            new THREE.Vector3(0.5, h, 0.5)
+        );
+        colliders.push(lampBox);
     });
+
+    // Masina
+    car = new THREE.Group();
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(2, 0.8, 4), new THREE.MeshStandardMaterial({ color: 0xcc0000 }));
+    chassis.position.y = 0.4; chassis.castShadow = true;
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.7, 2), new THREE.MeshStandardMaterial({ color: 0x111111 }));
+    cabin.position.set(0, 1.15, -0.5); cabin.castShadow = true;
+    car.add(chassis); car.add(cabin);
+
+    car.position.set(45, getH(45, 0) + 0.3, 0); 
+    scene.add(car);
 };
 
 // Camera
@@ -172,8 +195,10 @@ function updateDir() {
 updateDir();
 
 // Input
-renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
-
+document.getElementById('click').addEventListener('click', () => renderer.domElement.requestPointerLock());
+document.addEventListener('pointerlockchange', () => {
+    document.getElementById('click').style.display = document.pointerLockElement === renderer.domElement ? 'none' : 'flex';
+});
 document.addEventListener('mousemove', e => {
     if (document.pointerLockElement !== renderer.domElement) return;
     yaw += e.movementX * 0.12;
@@ -183,15 +208,13 @@ document.addEventListener('mousemove', e => {
 
 window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
 window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
-window.addEventListener('resize', () => { 
-    camera.aspect = innerWidth / innerHeight; 
-    camera.updateProjectionMatrix(); 
-    renderer.setSize(innerWidth, innerHeight); 
-});
+window.addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
 function loop() {
     requestAnimationFrame(loop);
-    const spd = 0.3;
+    
+    // 1. Logica Camerei
+    const spd = 1;
     const moveDir = new THREE.Vector3(dir.x, 0, dir.z).normalize();
     const r = new THREE.Vector3().crossVectors(moveDir, up).normalize();
     if (keys['w']) camera.position.addScaledVector(moveDir, spd);
@@ -201,6 +224,42 @@ function loop() {
     if (keys['q']) camera.position.y += spd;
     if (keys['e']) camera.position.y -= spd;
     camera.lookAt(camera.position.clone().add(dir));
+
+    // 2. Logica Masinii + Coliziuni
+    if (car) {
+        let carSpeed = 0;
+        let turn = 0;
+        
+        if (keys['arrowup']) carSpeed = 1;
+        if (keys['arrowdown']) carSpeed = -0.5;
+        if (keys['arrowleft']) turn = 0.1;
+        if (keys['arrowright']) turn = -0.1;
+
+        if (carSpeed !== 0 || turn !== 0) {
+            if (carSpeed !== 0) car.rotation.y += turn * Math.sign(carSpeed);
+
+            const oldPos = car.position.clone();
+            
+            car.translateZ(-carSpeed); 
+            car.position.y = getH(car.position.x, car.position.z) + 0.3;
+
+            car.updateMatrixWorld();
+            carBox.setFromObject(car);
+
+            let collision = false;
+            for (let box of colliders) {
+                if (carBox.intersectsBox(box)) {
+                    collision = true;
+                    break; 
+                }
+            }
+
+            if (collision) {
+                car.position.copy(oldPos);
+            }
+        }
+    }
+
     renderer.render(scene, camera);
 }
 loop();
